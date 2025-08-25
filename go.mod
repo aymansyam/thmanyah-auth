@@ -1,4 +1,4 @@
-module authservice
+module thmanyah-auth
 
 go 1.22
 
