@@ -3,7 +3,7 @@ appName: "app-name"
 image: ""
 # ---------------------------------------------
 
-port: 8082
+port: 8081
 enableHPA: true
 enableVPA: true
 enableNetworkPolicy: true
