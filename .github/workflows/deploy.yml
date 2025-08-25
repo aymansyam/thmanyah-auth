@@ -1,0 +1,135 @@
+name: Deploy Webhook
+
+on:
+  repository_dispatch:
+    types: [deploy-event]
+
+env:
+  PROJECT_ID: thmanyah-task
+  REGION_NAME: me-central1
+  MAX_INSTANCES: 5
+
+jobs:
+  build:
+    if: ${{ github.event.client_payload.skip_build != true }}
+    runs-on: ubuntu-latest-m
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Prepare Terraform Variables
+        run: |
+          TF_VARS=$(echo '${{ toJSON(vars) }}' | jq -c 'if . == null then {} else . end | with_entries(.)')
+          echo "TF_VAR_dynamic_env_vars=${TF_VARS}" >> $GITHUB_ENV
+
+      - name: Prepare Terraform Secrets
+        run: |
+          TF_SECRETS=$(echo '${{ toJSON(secrets) }}' | jq -c 'if . == null then {} else . end | with_entries(.)')
+          echo "TF_VAR_dynamic_env_secrets=${TF_SECRETS}" >> $GITHUB_ENV
+
+      - name: Setup GCP Authentication
+        uses: ./.github/actions/setup-gcp-authentication
+        with:
+          project-id: ${{ env.PROJECT_ID }}
+          region-name: ${{ env.REGION_NAME }}
+          gcp-sa-key: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY_FILE }}
+
+      - name: Build and tag Docker image
+        run: |
+          docker build -t ${{ env.DOCKER_IMAGE_NAME }} .
+          docker tag ${{ env.DOCKER_IMAGE_NAME }} ${{ env.REGION_NAME }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.DOCKER_IMAGE_NAME }}/${{ env.DOCKER_IMAGE_NAME }}
+
+      - name: Terraform Validate
+        id: validate
+        run: |
+          terraform -chdir=terraform/ validate -no-color
+
+      - name: Terraform apply
+        env:
+          TF_VAR_docker_image_name: ${{ env.DOCKER_IMAGE_NAME }}
+          TF_VAR_project_id: ${{ env.PROJECT_ID }}
+          TF_VAR_region_name: ${{ env.REGION_NAME }}
+          TF_VAR_max_instances: ${{ env.MAX_INSTANCES }}
+        run: terraform -chdir=terraform/ apply -target=google_artifact_registry_repository.repo -auto-approve
+
+      - name: Push Docker image
+        run: |
+          docker push ${{ env.REGION_NAME }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.DOCKER_IMAGE_NAME }}/${{ env.DOCKER_IMAGE_NAME }}
+
+      - name: Terraform apply after docker push
+        env:
+          TF_VAR_docker_image_name: ${{ env.DOCKER_IMAGE_NAME }}
+          TF_VAR_project_id: ${{ env.PROJECT_ID }}
+          TF_VAR_region_name: ${{ env.REGION_NAME }}
+          TF_VAR_max_instances: ${{ env.MAX_INSTANCES }}
+          TF_VAR_dynamic_env_vars: ${{ env.TF_VAR_dynamic_env_vars }}
+          TF_VAR_dynamic_env_secrets: ${{ env.TF_VAR_dynamic_env_secrets }}
+        run: |
+          MAX_RETRIES=10
+          RETRY_COUNT=0
+
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            if terraform -chdir=terraform/ apply -auto-approve; then
+              echo "Terraform apply succeeded"
+              exit 0
+            else
+              RETRY_COUNT=$((RETRY_COUNT+1))
+              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                echo "Terraform apply failed. Retrying in 10 seconds... (Attempt $RETRY_COUNT of $MAX_RETRIES)"
+                sleep 10
+              else
+                echo "Terraform apply failed after $MAX_RETRIES attempts"
+                exit 1
+              fi
+            fi
+          done
+
+  deploy:
+    needs: [build]
+    if: always()
+    runs-on: ubuntu-latest-m
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Set variables
+        run: |
+          echo "CLIENT_ID=${{ github.event.client_payload.client_id }}" >> $GITHUB_ENV
+          echo "AR_IMAGE=${{ env.REGION_NAME }}-docker.pkg.dev/${{ env.PROJECT_ID }}/nlu-api-ar-${{ github.event.client_payload.client_id }}/nlu-api-ar-${{ github.event.client_payload.client_id }}:latest" >> $GITHUB_ENV
+          echo "EN_IMAGE=${{ env.REGION_NAME }}-docker.pkg.dev/${{ env.PROJECT_ID }}/nlu-api-en-${{ github.event.client_payload.client_id }}/nlu-api-en-${{ github.event.client_payload.client_id }}:latest" >> $GITHUB_ENV
+
+      - name: Setup GCP Auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY_FILE }}
+
+      - name: Setup gcloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Install GKE gcloud auth plugin
+        run: |
+          gcloud components install gke-gcloud-auth-plugin --quiet
+
+      - name: Get GKE credentials
+        run: |
+          gcloud container clusters get-credentials nlu-gke-cluster \
+            --region ${{ env.REGION_NAME }} \
+            --project ${{ env.PROJECT_ID }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+
+      - name: Create namespace if needed
+        run: |
+          kubectl get namespace "$CLIENT_ID" >/dev/null 2>&1 || \
+          kubectl create namespace "$CLIENT_ID"
+          
+          kubectl label namespace "$CLIENT_ID" managed-by=bab-leap-nlu-deployer --overwrite
+          
+      - name: Deploy with Helm
+        run: |
+          helm upgrade --install $CLIENT_ID ./nlu-helm-chart \
+            --namespace $CLIENT_ID \
+            --set namespace=$CLIENT_ID \
+            --set arImage=$AR_IMAGE \
+            --set enImage=$EN_IMAGE

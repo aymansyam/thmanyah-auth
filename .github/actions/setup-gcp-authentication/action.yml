@@ -1,0 +1,69 @@
+name: 'Initialization Script'
+description: 'Setup multiple things such as GCP and terraform'
+
+inputs:
+  project-id:
+    description: 'GCP Project ID'
+    required: true
+  region-name:
+    description: 'GCP Region Name'
+    required: true
+  gcp-sa-key:
+    description: 'GCP Service Account Key'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v1
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: 1.9.0
+
+    - name: Extract branch name
+      shell: bash
+      run: echo "BRANCH_NAME=$(echo ${{ github.event.ref }} | sed 's/refs\/heads\///' | sed 's/[^a-zA-Z0-9-]/-/g' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+    - name: Set up repo name
+      shell: bash
+      run: |
+        echo "REPO_NAME=$(echo ${{ github.repository }} | sed 's/[^/]*\///' | sed 's/[^a-zA-Z0-9-]/-/g' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+        
+    - name: Set up DOCKER_IMAGE_NAME
+      shell: bash
+      run: echo "DOCKER_IMAGE_NAME=${{ env.REPO_NAME }}-${{ github.event.client_payload.client_id }}" >> $GITHUB_ENV
+
+    - name: Set up GCP Authentication
+      shell: bash
+      env:
+        GCP_SA_KEY: ${{ inputs.gcp-sa-key }}
+      run: |
+        echo "$GCP_SA_KEY" > gcp-sa-key.json
+        gcloud auth activate-service-account --key-file=gcp-sa-key.json
+
+    - name: Setup GCP Project ID
+      shell: bash
+      run: |
+        gcloud config set project ${{ inputs.project-id }}
+
+    - name: Auth GCP with Docker
+      shell: bash
+      run: |
+        gcloud auth configure-docker ${{ inputs.region-name }}-docker.pkg.dev
+
+
+    - name: Terraform Init
+      id: init
+      shell: bash
+      run: |
+        PROJECT_ID_HASH=$(echo -n "${{ inputs.project-id }}" | sha256sum | cut -d" " -f1 | cut -c1-5)
+        BUCKET_NAME="tf-state-leapnlu-jobs"
+        
+        if ! gsutil ls gs://${BUCKET_NAME}/; then
+          gsutil mb -b on -l ${{ inputs.region-name }} gs://${BUCKET_NAME}/
+        fi
+
+        terraform -chdir=terraform/ init -backend-config="bucket=${BUCKET_NAME}" -backend-config="prefix=${{ github.event.client_payload.client_id }}-ar/terraform/state"

@@ -1,0 +1,34 @@
+name: Delete branch resources
+
+on:
+  delete:
+    branches:
+      - '*'
+
+env:
+  PROJECT_ID: project-untitled-408018
+  REGION_NAME: me-central1
+  MAX_INSTANCES: 5
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'delete'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Setup GCP Authentication
+        uses: ./.github/actions/setup-gcp-authentication
+        with:
+          project-id: ${{ env.PROJECT_ID }}
+          region-name: ${{ env.REGION_NAME }}
+          gcp-sa-key: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY_FILE }}
+       
+      - name: Terraform Destroy
+        env:
+          TF_VAR_docker_image_name: ${{ env.DOCKER_IMAGE_NAME }}
+          TF_VAR_project_id: ${{ env.PROJECT_ID }}
+          TF_VAR_region_name: ${{ env.REGION_NAME }}
+          TF_VAR_max_instances: ${{ env.MAX_INSTANCES }}
+        run: terraform -chdir=terraform/ destroy -auto-approve
