@@ -1,0 +1,9 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ printf "%s-pdb" (required "values.appName must be set" .Values.appName) }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: {{ .Values.appName }}

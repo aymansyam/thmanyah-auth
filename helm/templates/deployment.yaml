@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ required "values.appName must be set" .Values.appName }}
+labels:
+  app: {{ .Values.appName }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Values.appName }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.appName }}
+    spec:
+      containers:
+        - name: {{ .Values.appName }}
+          image: {{ required "values.image must be set" .Values.image }}
+          ports:
+            - containerPort: {{ required "values.port must be set" .Values.port | int }}

@@ -1,0 +1,10 @@
+{{- if .Values.enableNetworkPolicy }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+{{- end }}

@@ -6,13 +6,15 @@ on:
 
 env:
   PROJECT_ID: thmanyah-task
-  REGION_NAME: me-central1
+  REGION_NAME: europe-west1
   MAX_INSTANCES: 5
+  CLUSTER_NAME: thmanyah-cluster
+  MANAGED_BY: thmanyah
 
 jobs:
   build:
     if: ${{ github.event.client_payload.skip_build != true }}
-    runs-on: ubuntu-latest-m
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
@@ -27,17 +29,21 @@ jobs:
           TF_SECRETS=$(echo '${{ toJSON(secrets) }}' | jq -c 'if . == null then {} else . end | with_entries(.)')
           echo "TF_VAR_dynamic_env_secrets=${TF_SECRETS}" >> $GITHUB_ENV
 
-      - name: Setup GCP Authentication
+      - name: Setup GCP Authentication & Initialize Terraform
         uses: ./.github/actions/setup-gcp-authentication
         with:
           project-id: ${{ env.PROJECT_ID }}
           region-name: ${{ env.REGION_NAME }}
           gcp-sa-key: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY_FILE }}
+          bucket-name: tf-state-${{ github.event.client_payload.service_name }}
+
+      - name: Define variables
+        run: echo "DOCKER_REMOTE_URL=${{ env.REGION_NAME }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.DOCKER_IMAGE_NAME }}/${{ env.DOCKER_IMAGE_NAME }}" >> $GITHUB_ENV
 
       - name: Build and tag Docker image
         run: |
           docker build -t ${{ env.DOCKER_IMAGE_NAME }} .
-          docker tag ${{ env.DOCKER_IMAGE_NAME }} ${{ env.REGION_NAME }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.DOCKER_IMAGE_NAME }}/${{ env.DOCKER_IMAGE_NAME }}
+          docker tag ${{ env.DOCKER_IMAGE_NAME }} ${{ env.DOCKER_REMOTE_URL }}
 
       - name: Terraform Validate
         id: validate
@@ -49,21 +55,17 @@ jobs:
           TF_VAR_docker_image_name: ${{ env.DOCKER_IMAGE_NAME }}
           TF_VAR_project_id: ${{ env.PROJECT_ID }}
           TF_VAR_region_name: ${{ env.REGION_NAME }}
-          TF_VAR_max_instances: ${{ env.MAX_INSTANCES }}
         run: terraform -chdir=terraform/ apply -target=google_artifact_registry_repository.repo -auto-approve
 
       - name: Push Docker image
         run: |
-          docker push ${{ env.REGION_NAME }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.DOCKER_IMAGE_NAME }}/${{ env.DOCKER_IMAGE_NAME }}
+          docker push ${{ env.DOCKER_REMOTE_URL }}
 
       - name: Terraform apply after docker push
         env:
           TF_VAR_docker_image_name: ${{ env.DOCKER_IMAGE_NAME }}
           TF_VAR_project_id: ${{ env.PROJECT_ID }}
           TF_VAR_region_name: ${{ env.REGION_NAME }}
-          TF_VAR_max_instances: ${{ env.MAX_INSTANCES }}
-          TF_VAR_dynamic_env_vars: ${{ env.TF_VAR_dynamic_env_vars }}
-          TF_VAR_dynamic_env_secrets: ${{ env.TF_VAR_dynamic_env_secrets }}
         run: |
           MAX_RETRIES=10
           RETRY_COUNT=0
@@ -86,17 +88,23 @@ jobs:
 
   deploy:
     needs: [build]
-    if: always()
-    runs-on: ubuntu-latest-m
+    # Ensure that the deployment runs if we set skip_build to true, but dont run if it failed
+    if: ${{ always() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v2
 
-      - name: Set variables
+      - name: Set REPO_NAME
+        run: echo "REPO_NAME=$(echo ${{ github.repository }} | sed 's/[^/]*\///' | sed 's/[^a-zA-Z0-9-]/-/g' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+      
+      - name: set DOCKER_REMOTE_URL
+        run: echo "DOCKER_REMOTE_URL=${{ env.REGION_NAME }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.REPO_NAME }}" >> $GITHUB_ENV
+
+      - name: Set service_name and IMAGE
         run: |
-          echo "CLIENT_ID=${{ github.event.client_payload.client_id }}" >> $GITHUB_ENV
-          echo "AR_IMAGE=${{ env.REGION_NAME }}-docker.pkg.dev/${{ env.PROJECT_ID }}/nlu-api-ar-${{ github.event.client_payload.client_id }}/nlu-api-ar-${{ github.event.client_payload.client_id }}:latest" >> $GITHUB_ENV
-          echo "EN_IMAGE=${{ env.REGION_NAME }}-docker.pkg.dev/${{ env.PROJECT_ID }}/nlu-api-en-${{ github.event.client_payload.client_id }}/nlu-api-en-${{ github.event.client_payload.client_id }}:latest" >> $GITHUB_ENV
+          echo "service_name=${{ github.event.client_payload.service_name }}" >> $GITHUB_ENV
+          echo "IMAGE=${{ env.DOCKER_REMOTE_URL }}:latest" >> $GITHUB_ENV
 
       - name: Setup GCP Auth
         uses: google-github-actions/auth@v2
@@ -112,7 +120,7 @@ jobs:
 
       - name: Get GKE credentials
         run: |
-          gcloud container clusters get-credentials nlu-gke-cluster \
+          gcloud container clusters get-credentials ${{ env.CLUSTER_NAME }} \
             --region ${{ env.REGION_NAME }} \
             --project ${{ env.PROJECT_ID }}
 
@@ -121,15 +129,14 @@ jobs:
 
       - name: Create namespace if needed
         run: |
-          kubectl get namespace "$CLIENT_ID" >/dev/null 2>&1 || \
-          kubectl create namespace "$CLIENT_ID"
-          
-          kubectl label namespace "$CLIENT_ID" managed-by=bab-leap-nlu-deployer --overwrite
-          
+          kubectl get namespace "$service_name" >/dev/null 2>&1 || \
+          kubectl create namespace "$service_name"
+
+          kubectl label namespace "$service_name" managed-by=${{ env.MANAGED_BY }} --overwrite
+
       - name: Deploy with Helm
         run: |
-          helm upgrade --install $CLIENT_ID ./nlu-helm-chart \
-            --namespace $CLIENT_ID \
-            --set namespace=$CLIENT_ID \
-            --set arImage=$AR_IMAGE \
-            --set enImage=$EN_IMAGE
+          helm upgrade --install $service_name ./helm \
+            --namespace $service_name \
+            --set appName=$service_name \
+            --set image=$IMAGE \

@@ -1,0 +1,30 @@
+# ----- Inserted Dynamically via CI/CD --------
+appName: "app-name"
+image: ""
+# ---------------------------------------------
+
+port: 8082
+enableHPA: true
+enableVPA: true
+enableNetworkPolicy: true
+networkPolicy:
+  allowedNamespaces:
+    - thmanyah-backend
+  allowSameNamespace: true
+
+hpa:
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    cpu:
+      enabled: true
+      targetAverageUtilization: 70
+    memory:
+      enabled: false
+
+vpa:
+  updateMode: "Initial"
+  # Only control memory to avoid HPA/CPU loop
+  controlledResources: ["memory"]
+  minAllowed: { memory: "128Mi" }
+  maxAllowed: { memory: "2Gi" }
