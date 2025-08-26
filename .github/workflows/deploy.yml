@@ -6,7 +6,7 @@ on:
 
 env:
   PROJECT_ID: thmanyah-task
-  REGION_NAME: europe-west1
+  REGION_NAME: us-west1
   MAX_INSTANCES: 5
   CLUSTER_NAME: thmanyah-cluster
   MANAGED_BY: thmanyah
