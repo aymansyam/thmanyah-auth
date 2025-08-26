@@ -12,6 +12,9 @@ networkPolicy:
     - thmanyah-backend
   allowSameNamespace: true
 
+service:
+  type: ClusterIP
+
 hpa:
   minReplicas: 3
   maxReplicas: 10

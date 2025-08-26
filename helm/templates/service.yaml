@@ -12,4 +12,4 @@ spec:
       port: {{ .Values.port | int }}
       targetPort: {{ .Values.port | int }}
       protocol: TCP
-  type: ClusterIP
+  type: {{ default "ClusterIP" .Values.service.type }}
